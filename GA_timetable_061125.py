@@ -17,6 +17,28 @@ import pandas as pd
 SLOTS_PER_DAY = 6
 
 
+def _load_branch_hours(path: str, rooms_df: pd.DataFrame) -> set[tuple[str, int, int]]:
+    """
+    Return the set of (Branch, Day, Slot) that are Active=1.
+    If the 'BranchHours' sheet is missing or empty, assume every (branch,day,slot) is allowed.
+    """
+    try:
+        bh = pd.read_excel(path, sheet_name="BranchHours")
+        bh["Branch"] = bh["Branch"].astype(str).str.strip()
+        bh["Day"] = pd.to_numeric(bh["Day"], errors="coerce").astype(int)
+        bh["Slot"] = pd.to_numeric(bh["Slot"], errors="coerce").astype(int)
+        bh["Active"] = pd.to_numeric(bh["Active"], errors="coerce").fillna(0).astype(int)
+        allowed = set(map(tuple, bh.loc[bh["Active"] == 1, ["Branch", "Day", "Slot"]]
+                          .itertuples(index=False, name=None)))
+        if not allowed:
+            branches = rooms_df["Branch"].astype(str).str.strip().unique().tolist()
+            allowed = {(b, d, s) for b in branches for d in range(1, 8) for s in range(1, 7)}
+        return allowed
+    except Exception:
+        branches = rooms_df["Branch"].astype(str).str.strip().unique().tolist()
+        return {(b, d, s) for b in branches for d in range(1, 8) for s in range(1, 7)}
+
+
 def load_input_data(path: str):
     classes_df = pd.read_excel(path, sheet_name="Classes")
     teachers_df = pd.read_excel(path, sheet_name="Teachers")
@@ -92,6 +114,8 @@ def load_input_data(path: str):
         if tid in availability and day in availability[tid] and slot in availability[tid][day]:
             availability[tid][day][slot] = available
 
+    allowed_branch_slots = _load_branch_hours(path, rooms_df)
+
     return {
         "class_ids": class_ids,
         "class_branch": class_branch,
@@ -108,6 +132,7 @@ def load_input_data(path: str):
         "availability": availability,
         "days": days,
         "slots_per_day": slots_per_day,
+        "allowed_branch_slots": allowed_branch_slots,
     }
 
 
@@ -241,6 +266,9 @@ def try_assign_sessions(
     allocated: List[Session] = []
     for sess in sessions:
         teacher = sess.teacher
+        # BranchHours: branch must be active at (day, slot)
+        if (class_branch, sess.day, sess.slot) not in data["allowed_branch_slots"]:
+            break
         if class_level not in qualifications.get(teacher, set()):
             break
         if not state.can_assign_teacher(teacher, sess.day, sess.slot, class_branch, availability, min_max):
@@ -307,7 +335,11 @@ def generate_sessions_for_class(
             if not first_pool or not second_pool:
                 continue
 
-            for slot1 in random.sample(range(1, slots_per_day + 1), slots_per_day):
+            slot1_pool = [s for s in range(1, slots_per_day + 1)
+                          if (class_branch, day1, s) in data["allowed_branch_slots"]]
+            if not slot1_pool:
+                continue
+            for slot1 in random.sample(slot1_pool, len(slot1_pool)):
                 candidate_rooms1 = [r for r in valid_rooms if state.can_assign_room(r, day1, slot1)]
                 if not candidate_rooms1:
                     continue
@@ -323,7 +355,11 @@ def generate_sessions_for_class(
                         state.assign_room(room1, day1, slot1, class_id)
 
                         success = False
-                        for slot2 in random.sample(range(1, slots_per_day + 1), slots_per_day):
+                        slot2_pool = [s for s in range(1, slots_per_day + 1)
+                                      if (class_branch, day2, s) in data["allowed_branch_slots"]]
+                        if not slot2_pool:
+                            continue
+                        for slot2 in random.sample(slot2_pool, len(slot2_pool)):
                             candidate_rooms2 = [r for r in valid_rooms if state.can_assign_room(r, day2, slot2)]
                             if not candidate_rooms2:
                                 continue
@@ -489,6 +525,12 @@ def build_schedule_dataframe(assignments: Dict[int, List[Session]], data: Dict) 
 def save_results(assignments: Dict[int, List[Session]], data: Dict, fitness_history: List[int]) -> None:
     df = build_schedule_dataframe(assignments, data)
     df.sort_values(["Day", "Slot", "Branch", "ClassID", "Session"], inplace=True)
+    allowed = data.get("allowed_branch_slots", set())
+    if allowed:
+        bad = [(r.Branch, int(r.Day), int(r.Slot))
+               for r in df.itertuples() if (r.Branch, int(r.Day), int(r.Slot)) not in allowed]
+        if bad:
+            raise RuntimeError(f"Schedule contains BranchHours violations: {bad[:10]} (total {len(bad)})")
     df.to_excel("schedule.xlsx", index=False)
 
     plt.figure()
@@ -517,7 +559,23 @@ def main():
         default="InputData.xlsx",
         help="Path to the Excel file containing schedule data",
     )
-    args = parser.parse_args()
+    # === Spyder-safe argv: allow running in Spyder without Run configuration ===
+    import sys
+    def _spyder_argv():
+        # If running inside Spyder/spyder_kernels, return default args
+        if any(k in sys.modules for k in ('spyder', 'spyder_kernels')):
+            return [
+                '--input_file', 'InputData.xlsx',
+                '--population_size', '10',
+                '--generations', '30',
+                '--crossover_rate', '0.8',
+                '--mutation_rate', '0.05'
+            ]
+        return None
+
+    _argv = _spyder_argv()
+    args = parser.parse_args(_argv if _argv is not None else None)
+    # ========================================================================
 
     random.seed(42)
 
