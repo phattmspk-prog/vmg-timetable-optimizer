@@ -300,6 +300,12 @@ def generate_sessions_for_class(
     if not full_teachers or not part_teachers:
         return None
 
+    def _balanced(pool):
+        # Shuffle for tie-breaking, then sort by current load ascending
+        tmp = pool[:]
+        random.shuffle(tmp)
+        return sorted(tmp, key=lambda t: state.teacher_load[t])
+
     valid_rooms = [r for r in room_ids_per_branch.get(class_branch, []) if capacities.get(r, 0) >= class_size]
     if not valid_rooms:
         return None
@@ -328,7 +334,7 @@ def generate_sessions_for_class(
                 if not candidate_rooms1:
                     continue
 
-                for teacher1 in random.sample(first_pool, len(first_pool)):
+                for teacher1 in (_balanced(first_pool) if first_role == "full-time" else random.sample(first_pool, len(first_pool))):
                     if not availability[teacher1][day1][slot1]:
                         continue
                     if not state.can_assign_teacher(teacher1, day1, slot1, class_branch, availability, min_max, teacher_type):
@@ -351,7 +357,7 @@ def generate_sessions_for_class(
                             if not candidate_rooms2:
                                 continue
 
-                            for teacher2 in random.sample(second_pool, len(second_pool)):
+                            for teacher2 in (_balanced(second_pool) if second_role == "full-time" else random.sample(second_pool, len(second_pool))):
                                 if not availability[teacher2][day2][slot2]:
                                     continue
                                 if not state.can_assign_teacher(teacher2, day2, slot2, class_branch, availability, min_max, teacher_type):
@@ -530,7 +536,9 @@ def build_schedule_dataframe(assignments: Dict[int, List[Session]], data: Dict) 
                     "Size": class_size[class_id],
                 }
             )
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    df = df.reindex(columns=["ClassID", "Level", "Session", "Day", "Slot", "RoomID", "Branch", "TeacherID", "TeacherType", "Size"])
+    return df
 
 
 def save_results(assignments: Dict[int, List[Session]], data: Dict, fitness_history: List[int]) -> None:
